@@ -1,14 +1,18 @@
 ---
+import { Icon } from "astro-icon/components";
 import ButtonLink from "@/components/common/ButtonLink.astro";
 import WidgetLayout from "@/components/common/WidgetLayout.astro";
 import I18nKey from "@/i18n/i18nKey";
 import { i18n } from "@/i18n/translation";
 import type { WidgetComponentConfig } from "@/types/config";
-import { getCategoryList } from "@/utils/content-utils";
+import { getCategoryList, getSortedPostsList } from "@/utils/content-utils";
+import { getPostUrlBySlug } from "@/utils/url-utils";
 
 const categories = await getCategoryList();
+const posts = await getSortedPostsList();
 
 const COLLAPSED_HEIGHT = "7.5rem";
+const uncategorizedName = i18n(I18nKey.uncategorized);
 
 interface Props {
 	class?: string;
@@ -22,18 +26,233 @@ const showTitle = widgetConfig?.showTitle !== false;
 const isCollapsed = collapseThreshold
 	? categories.length > collapseThreshold
 	: false;
+
+// 与 getCategoryList() 保持一致：空分类统一归入本地化的“未分类”。
+const getPostCategoryName = (category?: string | null) =>
+	category?.trim() || uncategorizedName;
+
+// 沿用现有分类顺序，并将排序后的文章挂到对应分类下。
+const categoryTree = categories.map((category) => ({
+	...category,
+	posts: posts.filter(
+		(post) => getPostCategoryName(post.data.category) === category.name,
+	),
+}));
+
+// 统一末尾斜杠后比较 URL，兼容 BASE_URL 和嵌套文章路径。
+const normalizePath = (value: string | URL) => {
+	const pathname =
+		value instanceof URL ? value.pathname : new URL(value, Astro.url).pathname;
+	return pathname.replace(/\/+$/, "") || "/";
+};
+
+// 首次直达文章页时在服务端预先展开和高亮，避免客户端切换造成闪烁。
+const currentPath = normalizePath(Astro.url);
+const initialPost = posts.find(
+	(post) => normalizePath(getPostUrlBySlug(post.id)) === currentPath,
+);
+const initialCategoryName = initialPost
+	? getPostCategoryName(initialPost.data.category)
+	: "";
+const isInitialPost = !!initialPost;
+const widgetClass = [className, isInitialPost && "categories-tree-mode"]
+	.filter(Boolean)
+	.join(" ");
 ---
 
-<WidgetLayout name={i18n(I18nKey.categories)} showTitle={showTitle} id="categories" isCollapsed={isCollapsed} collapsedHeight={COLLAPSED_HEIGHT}
-                class={className} style={style}
+<WidgetLayout
+	name={i18n(I18nKey.categories)}
+	showTitle={showTitle}
+	id="categories"
+	isCollapsed={isCollapsed}
+	collapsedHeight={COLLAPSED_HEIGHT}
+	class={widgetClass}
+	style={style}
 >
-    {categories.map((c) =>
-        <ButtonLink
-            url={c.url}
-            badge={String(c.count)}
-            label={`View all posts in the ${c.name.trim()} category`}
-        >
-            {c.name.trim()}
-        </ButtonLink>
-    )}
+	<div
+		data-categories-root
+		data-current-post-id={initialPost?.id || undefined}
+	>
+		<!-- 普通页面保留原分类链接列表；文章页由同步脚本隐藏此视图。 -->
+		<div data-categories-list hidden={isInitialPost}>
+			{
+				categories.map((category) => (
+					<ButtonLink
+						url={category.url}
+						badge={String(category.count)}
+						label={`View all posts in the ${category.name.trim()} category`}
+					>
+						{category.name.trim()}
+					</ButtonLink>
+				))
+			}
+		</div>
+
+		<!-- 两种视图同时渲染，确保静态侧栏在 Swup 导航后也能直接切换。 -->
+		<div data-categories-tree hidden={!isInitialPost}>
+			{
+				categoryTree.map((category) => (
+					<details
+						class="category-tree-branch"
+						data-category-name={category.name}
+						open={category.name === initialCategoryName}
+					>
+						<summary
+							class="category-tree-summary focus-ring-inset flex h-10 cursor-pointer list-none items-center gap-2 rounded-lg px-2
+								text-neutral-700 transition-colors hover:bg-(--btn-plain-bg-hover) hover:text-(--primary)
+								dark:text-neutral-300 dark:hover:text-(--primary)"
+						>
+							<Icon
+								is:inline
+								name="material-symbols:folder-outline-rounded"
+								class="shrink-0 text-xl"
+							/>
+							<span class="min-w-0 flex-1 truncate font-medium">
+								{category.name.trim()}
+							</span>
+							<span class="shrink-0 text-sm font-bold text-(--btn-content)">
+								{category.count}
+							</span>
+							<Icon
+								is:inline
+								name="material-symbols:chevron-right-rounded"
+								class="category-tree-chevron shrink-0 text-lg transition-transform"
+							/>
+						</summary>
+
+						<div class="category-tree-posts ml-5 border-l border-(--line-divider) pl-2">
+							{category.posts.map((post) => {
+								const isCurrent = post.id === initialPost?.id;
+								return (
+									<a
+										href={getPostUrlBySlug(post.id)}
+										data-post-id={post.id}
+										data-current={isCurrent ? "" : undefined}
+										aria-current={isCurrent ? "page" : undefined}
+										aria-label={post.data.title}
+										class="category-tree-post flex h-9 min-w-0 items-center gap-2 rounded-lg px-2 text-sm
+											text-neutral-600 transition-colors hover:bg-(--btn-plain-bg-hover) hover:text-(--primary)
+											dark:text-neutral-400 dark:hover:text-(--primary)"
+									>
+										<Icon
+											is:inline
+											name="material-symbols:description-outline-rounded"
+											class="shrink-0 text-base"
+										/>
+										<span class="truncate">{post.data.title}</span>
+									</a>
+								);
+							})}
+						</div>
+					</details>
+				))
+			}
+		</div>
+	</div>
 </WidgetLayout>
+
+<style>
+	.category-tree-summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.category-tree-branch[open] .category-tree-chevron {
+		transform: rotate(90deg);
+	}
+
+	.category-tree-post[data-current] {
+		background: var(--btn-plain-bg-hover);
+		color: var(--primary);
+		font-weight: 600;
+		outline: 1px solid color-mix(in srgb, var(--primary) 45%, transparent);
+		outline-offset: -1px;
+	}
+
+	/* 文章树不受 WidgetLayout 的分类数量折叠高度限制。 */
+	:global(widget-layout.categories-tree-mode > .collapse-wrapper) {
+		height: auto !important;
+		overflow: visible !important;
+	}
+
+	/* 仅隐藏外层“更多”按钮，不改动其内部展开状态，返回普通页后可原样恢复。 */
+	:global(widget-layout.categories-tree-mode > .expand-btn) {
+		display: none !important;
+	}
+</style>
+
+<script>
+	const categoriesWindow = window as typeof window & {
+		__fireflyCategoriesTreeBound?: boolean;
+	};
+
+	function normalizeCategoryPath(value: string) {
+		const pathname = new URL(value, window.location.href).pathname;
+		return pathname.replace(/\/+$/, "") || "/";
+	}
+
+	// 左侧栏在当前布局下不会被 Swup 替换，因此每次导航后需按当前 URL 同步视图。
+	function syncCategoryTrees() {
+		const currentPath = normalizeCategoryPath(window.location.href);
+
+		// 同步桌面侧栏和移动端底部可能同时存在的全部分类组件实例。
+		document
+			.querySelectorAll<HTMLElement>("[data-categories-root]")
+			.forEach((root) => {
+				const list = root.querySelector<HTMLElement>("[data-categories-list]");
+				const tree = root.querySelector<HTMLElement>("[data-categories-tree]");
+				const links = Array.from(
+					root.querySelectorAll<HTMLAnchorElement>(
+						"[data-categories-tree] a[data-post-id]",
+					),
+				);
+				// 用实际生成的文章链接匹配当前页，避免从 pathname 反推带扩展名的内容 ID。
+				const currentLink = links.find(
+					(link) => normalizeCategoryPath(link.href) === currentPath,
+				);
+				const showTree = !!currentLink;
+
+				if (list) list.hidden = showTree;
+				if (tree) tree.hidden = !showTree;
+
+				links.forEach((link) => {
+					link.removeAttribute("data-current");
+					link.removeAttribute("aria-current");
+				});
+
+				if (currentLink) {
+					currentLink.setAttribute("data-current", "");
+					currentLink.setAttribute("aria-current", "page");
+
+					const currentPostId = currentLink.dataset.postId || "";
+					// 仅在文章真正变化时收起旧分支，避免重复生命周期事件打断用户手动展开。
+					if (root.dataset.currentPostId !== currentPostId) {
+						root
+							.querySelectorAll<HTMLDetailsElement>(
+								"[data-categories-tree] details",
+							)
+							.forEach((details) => {
+								details.open = false;
+							});
+					}
+
+					currentLink.closest<HTMLDetailsElement>("details")?.setAttribute("open", "");
+					root.dataset.currentPostId = currentPostId;
+				} else {
+					delete root.dataset.currentPostId;
+				}
+
+				root
+					.closest("widget-layout")
+					?.classList.toggle("categories-tree-mode", showTree);
+			});
+	}
+
+	syncCategoryTrees();
+
+	// 组件可能存在多个实例或被动态插入，全局监听只绑定一次。
+	if (!categoriesWindow.__fireflyCategoriesTreeBound) {
+		categoriesWindow.__fireflyCategoriesTreeBound = true;
+		document.addEventListener("astro:page-load", syncCategoryTrees);
+		document.addEventListener("swup:contentReplaced", syncCategoryTrees);
+	}
+</script>
